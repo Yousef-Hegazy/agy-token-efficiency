@@ -1,0 +1,6 @@
+{
+  "name": "subagent-efficiency",
+  "displayName": "Token-Efficient Subagents",
+  "version": "1.0.0",
+  "description": "Low-reasoning subagents and automated delegation rules for fast code editing and code searching to drastically reduce token usage in Antigravity 2.0 and Antigravity IDE."
+}
