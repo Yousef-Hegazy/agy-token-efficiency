@@ -56,10 +56,10 @@ agy plugin install /path/to/subagent-efficiency
 ```
 
 ### Option B: Install from Git Remote
-If published to GitHub or a Git remote:
+Install directly from GitHub:
 
 ```bash
-agy plugin install https://github.com/<org-or-username>/subagent-efficiency
+agy plugin install https://github.com/Yousef-Hegazy/agy-token-efficiency.git
 ```
 
 ---
