@@ -124,3 +124,95 @@ test('session-start initializes root state and emits Brain & Limbs protocol mess
   const saved = utils.loadState('root-conv-1', stateDir);
   assert.equal(saved.isSubagent, false);
 });
+
+test('pre-tool-gate blocks high-bloat Brain calls once (1-shot) and allows retry in soft-gate mode', () => {
+  const stateDir = makeTempStateDir();
+  const payload = {
+    conversationId: 'conv-gate-1',
+    stepIdx: 5,
+    lastUserInput: 'run tests',
+    toolCall: { name: 'run_command', args: { CommandLine: 'npm test' } },
+  };
+
+  const first = runHook('scripts/pre-tool-gate.js', payload, { PLUGIN_DATA: stateDir });
+  assert.equal(first.decision, 'deny');
+  assert.match(first.reason, /verifier/);
+
+  const second = runHook('scripts/pre-tool-gate.js', payload, { PLUGIN_DATA: stateDir });
+  assert.equal(second.decision, 'allow');
+});
+
+test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, respects strict & advisory modes, and bypasses subagents', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+
+  const buildRes = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: 'conv-gate-2',
+      stepIdx: 1,
+      lastUserInput: 'build',
+      toolCall: { name: 'run_command', args: { CommandLine: 'npx tsc --noEmit' } },
+    },
+    env
+  );
+  assert.equal(buildRes.decision, 'deny');
+  assert.match(buildRes.reason, /builder/);
+
+  const readRes = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: 'conv-gate-2',
+      stepIdx: 2,
+      lastUserInput: 'build',
+      toolCall: { name: 'read_file', args: { Path: 'd:/repo/src/app.ts' } },
+    },
+    env
+  );
+  assert.equal(readRes.decision, 'deny');
+  assert.match(readRes.reason, /code-searcher/);
+
+  const smallRead = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: 'conv-gate-2',
+      stepIdx: 3,
+      lastUserInput: 'build',
+      toolCall: { name: 'read_file', args: { Path: 'd:/repo/src/app.ts', StartLine: 1, EndLine: 50 } },
+    },
+    env
+  );
+  assert.equal(smallRead.decision, 'allow');
+
+  const strictEnv = { PLUGIN_DATA: stateDir, AGY_EFFICIENCY_MODE: 'strict' };
+  const strictPayload = {
+    conversationId: 'conv-strict',
+    stepIdx: 1,
+    lastUserInput: 'edit',
+    toolCall: { name: 'edit_file', args: { Path: 'd:/repo/src/a.ts' } },
+  };
+  assert.equal(runHook('scripts/pre-tool-gate.js', strictPayload, strictEnv).decision, 'deny');
+  assert.equal(runHook('scripts/pre-tool-gate.js', strictPayload, strictEnv).decision, 'deny');
+
+  assert.equal(
+    runHook('scripts/pre-tool-gate.js', strictPayload, {
+      PLUGIN_DATA: stateDir,
+      AGY_EFFICIENCY_MODE: 'advisory',
+    }).decision,
+    'allow'
+  );
+
+  const subTranscript = path.join(stateDir, 'sub-gate.jsonl');
+  fs.writeFileSync(
+    subTranscript,
+    JSON.stringify({ step_index: 0, source: 'AGENT', type: 'USER_INPUT' }) + '\n'
+  );
+  assert.equal(
+    runHook(
+      'scripts/pre-tool-gate.js',
+      { ...strictPayload, conversationId: 'sub-conv', transcriptPath: subTranscript },
+      strictEnv
+    ).decision,
+    'allow'
+  );
+});
