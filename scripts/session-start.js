@@ -1,36 +1,44 @@
 #!/usr/bin/env node
-/**
- * Antigravity SessionStart hook for Token-Efficient Subagents.
- * Injects subagent registration and delegation directives at session initialization.
- */
+'use strict';
 
-let buffer = '';
-let handled = false;
+const {
+  readStdinJson,
+  getStateDir,
+  loadState,
+  saveState,
+  isSubagent,
+  emitJson,
+} = require('./hook-utils');
 
-function finish() {
-  if (handled) return;
-  handled = true;
-  const result = {
+async function main() {
+  const payload = await readStdinJson(500);
+  const convId = payload.conversationId;
+  const stateDir = getStateDir();
+  const state = loadState(convId, stateDir);
+  const sub = isSubagent(payload, state);
+  state.isSubagent = sub;
+  saveState(convId, state, stateDir);
+
+  if (sub) {
+    return emitJson({});
+  }
+
+  return emitJson({
     injectSteps: [
       {
         systemMessage: {
           systemMessage:
-            "[Token-Efficiency Protocol Active]\n" +
-            "To drastically minimize token usage and latency across Antigravity 2.0 & IDE:\n" +
-            "1. 'code-searcher' (Model: 'flash_lite', Read-only): Delegate file searching, symbol grep, and repository exploration here. Avoid reading full files into main context.\n" +
-            "2. 'fast-editor' (Model: 'flash_lite', Write-enabled): Delegate small-to-medium edits, localized refactorings, documentation, and routine fixes here.\n" +
-            "If these subagents are not yet registered in this session, call define_subagent once before first invocation."
-        }
-      }
-    ]
-  };
-  process.stdout.write(JSON.stringify(result));
-  process.exit(0);
+            '[Brain & Limbs Protocol Active]\n' +
+            'Act strictly as the orchestrator (Brain). Delegate execution to pre-registered flash_lite Limbs via invoke_subagent:\n' +
+            "- 'code-searcher': File discovery, symbol grep, multi-line/full-file reads.\n" +
+            "- 'fast-editor': Targeted code edits, refactors, docstrings, file writes.\n" +
+            "- 'builder': Builds, compiles, typechecks, linters (returns exact file:line error digests).\n" +
+            "- 'verifier': Test suites, diff/requirement checks, anti-cheat assertion verification.\n" +
+            'Send crisp TARGET/TASK/DETAIL_LEVEL signals; request exact_lines/exact_snippets when needed. Escalate to flash only after repeated failure.',
+        },
+      },
+    ],
+  });
 }
 
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { buffer += chunk; });
-process.stdin.on('end', finish);
-
-// Safety fallback timer if stdin does not emit EOF
-setTimeout(finish, 1000);
+main().catch(() => emitJson({}));
