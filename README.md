@@ -1,57 +1,64 @@
 # Token-Efficient Subagents (`subagent-efficiency` v2.0)
 
-A **Brain & Limbs** optimization plugin for **Google Antigravity** (Antigravity App, Antigravity IDE, and `agy` CLI) that isolates raw file reads, code searches, routine edits, builds, linters, and test runs inside lightweight `flash_lite` subagents—keeping the primary model's context window clean and reasoning costs minimal.
+A **3-tier Brain & Limbs** optimization plugin for **Google Antigravity** (Antigravity App, Antigravity IDE, and `agy` CLI) that routes work across top-tier Brain reasoning, mid-tier `flash` implementation, and `flash_lite` execution—preventing raw log bloat, delegation-loop failures, and polling overhead.
 
 ---
 
-## Architecture: Brain & Limbs
+## Optimization Objective & 3-Tier Roster
 
-- **The Brain (Primary Model):** Focuses strictly on planning, architectural reasoning, design decisions, and synthesizing final answers.
-- **The Limbs (4 Pre-Registered `flash_lite` Subagents in `agents/`):** Execute scoped operational work in isolated contexts and return terse, structured signals with exact `file:line` citations:
-  - **`code-searcher`** (`flash_lite`, read-only): File discovery, symbol grep, dependency tracing, and large/multi-file inspection.
-  - **`fast-editor`** (`flash_lite`, write-enabled): Targeted edits, refactors, docstrings, boilerplate, and file creation.
-  - **`builder`** (`flash_lite`, sandbox shell): Compiles, builds, typechecks (`tsc`, `cargo`, `mypy`, etc.), and linters (`eslint`, `ruff`); strips noisy logs and returns `file:line:col` error digests.
-  - **`verifier`** (`flash_lite`, sandbox shell): Runs test suites and verifies diffs/assertions; returns pass/fail counts and exact failing `file:line` locations.
+We optimize **Total Cost**, not merely bytes per Brain tool call:
 
-### Token Economic Impact
+$$\text{Total Cost} = (\text{Brain\_Turns} \times \text{Avg\_Context}) + \text{Limb\_Cold\_Starts}$$
 
-| Scenario | Direct Execution (Without Plugin) | Brain & Limbs (With Plugin) | Net Impact |
+Every Limb spawn pays an uncached cold-start cost plus a Brain orchestration turn, while under-powered models burn multi-turn retry loops on complex logic. Routing each task to the right tier prevents both extremes:
+
+| Role / Tier | Owner | Model | Scope |
 | :--- | :--- | :--- | :--- |
-| **Grep / Search across 10 files** | Dumps 5,000–15,000 tokens into Brain context for every future turn | `code-searcher` inspects in isolation; returns exact `file:line` locations (~150 tokens) | **~90–98% token reduction** |
-| **Build / Typecheck / Test loops** | Compiler & test logs flood Brain history across iterative fix cycles | `builder` & `verifier` strip noise and return exact failing `file:line` digests | **~80–95% log bloat prevented** |
-| **Mechanical / Routine Edits** | Primary model burns high-tier output/reasoning tokens | `fast-editor` applies exact edits on `flash_lite` and reports modified lines | **~60–85% output/reasoning savings** |
-| **Skill / Artifact / `<=80`-line read** | Subagent spawn adds unnecessary latency | Explicitly exempted so Brain workflows stay fast with zero overhead | **Zero negative-ROI overhead** |
+| **Orchestrator & Surgical Fixer** | **Brain** | Top-tier (Primary) | Architecture, planning, hard debugging, bounded direct reads (`<=300` lines / small files `<=250` lines & `10 KB`), and `<50`-line surgical edits already in context. |
+| **Complex Code Author** | **`implementer`** | `flash` (mid-tier) | Multi-file features, large refactors, complex/type-heavy logic (Rust lifetimes/borrowing/match arms, parsers, state logic) + targeted self-verify (`VERIFICATION: PASS \| FAIL`). |
+| **Mechanical Editor** | **`fast-editor`** | `flash_lite` | Strictly mechanical boilerplate, repetitive renames, scaffolding, or verbatim replacements with exact lines & signatures supplied by Brain. |
+| **Recon & Discovery** | **`code-searcher`** | `flash_lite` | Single-shot comprehensive discovery, multi-file tracing, `>300`-line files; returns exact `file:line`, verbatim signatures, and exact imports in `<=6–8` turns. |
+| **Consolidated Runner** | **`verifier`** | `flash_lite` | All standalone builds, typechecks, linters, test suites, combined compile+test pipelines (`cargo test`, `tsc` + `vitest run`), and diff audits with 15–20 line failure snippets. |
 
 ---
 
-## Signal-In / Signal-Out Precision Contract
+## Anti-Patterns Prevented (Production Telemetry Guardrails)
 
-Limbs communicate with the Brain using compact structured signals:
-
-- **Signal-In (Brain → Limb):** `TARGET`, `TASK`, `DETAIL_LEVEL` (`summary` | `exact_lines` | `exact_snippets`), and `CONSTRAINTS`.
-- **Signal-Out (Limb → Brain):** `STATUS` (`OK` | `FAIL` | `NOT_FOUND` | `AMBIGUOUS`), `LOCATIONS` (exact `path/to/file.ext:Lstart-Lend`), `SUMMARY` (1–5 terse bullets), optional `SNIPPETS` (when `exact_snippets` is requested or on failure), and `NEXT`.
-- **Model Escalation:** Always start on `flash_lite`; escalate a single retry to `flash` only if a Limb returns `AMBIGUOUS` or fails twice on the same task.
+1. **Zero-Polling Rule (No `schedule` / `sleep` loops):** `PreToolUse` hard-blocks `schedule` polling timers and shell `sleep`/`Start-Sleep`/`timeout /t` loops; Brain dispatches parallel Limbs and ends its turn for automatic reactive wakeup.
+2. **Realistic Read Thresholds (No `<=80`-line thrashing):** `PreToolUse` allows bounded reads up to **300 lines** (capped against minified mega-lines at `24 KB`) and unbounded reads of small files **<= 250 lines / 10 KB**, only hard-blocking genuinely large/unknown unbounded reads with exact recommended `StartLine`/`EndLine` bounds.
+3. **Zero Turn-Wasting Edit/Search Rejections (`soft-gate`):** Direct Brain edits, quick `grep_search`/`find_by_name`, and targeted single-file checks run without `PreToolUse` rejections in `soft-gate` mode, eliminating retry-turn overhead.
+4. **Coarse-Grained Batching & Tiered Anti-Thrashing Nudges:** Target **<= 10–15 Limbs** per complex task. `PostToolUse` + `PreInvocation` nudge on `>3` micro-reads on the same file, `>2` `fast-editor` retries on one file (escalate to `implementer`), `>2` `implementer` retries on one file (Brain takeover), or `>15` Limb spawns in a turn.
+5. **Smarter `Stop` Hook (No False-Positive Rejections):** `stop-verify.js` stays silent when only non-source files (`.md`, `.txt`, images) changed, when verification passed after the last source mutation, or when `implementer`, `fast-editor` (`VERIFICATION: PASS`), or `verifier` already passed in state or transcript.
+6. **OS/Shell Dialect & Single-Run Enforcement:** `SessionStart` detects Windows PowerShell 5.1 vs `pwsh` 7+ vs POSIX `sh`/`bash`, forbidding `&&` chaining on PS 5.1 and mandating non-interactive single-run test flags (`vitest run`, never watch mode/background daemons).
 
 ---
 
-## Lifecycle Hooks & Enforcement Modes
+## Signal-In / Signal-Out Contract
+
+- **Signal-In (Brain → Limb):** `TARGET`, `TASK`, `DETAIL_LEVEL` (`summary` | `exact_lines` | `exact_snippets`), and `CONSTRAINTS` (including OS shell rules & verification command).
+- **Signal-Out (Limb → Brain):** `STATUS` (`OK` | `FAIL` | `NOT_FOUND` | `AMBIGUOUS`), `LOCATIONS` (`path/to/file.ext:Lstart-Lend`), `VERIFICATION` (for `implementer` & `fast-editor`), `SIGNATURES_AND_IMPORTS` (for `code-searcher`), `COUNTS` (for `verifier`), `SUMMARY`, self-contained `SNIPPETS` (15–20 lines on failure), and `NEXT`.
+- **Escalation Ladder:** `fast-editor` (`flash_lite`) → `implementer` (`flash`) → Brain direct takeover after max **2** retries per tier.
+
+---
+
+## Lifecycle Hooks & Gate Modes
 
 `hooks.json` configures five zero-dependency Node.js lifecycle hooks (exiting `0` safely across Windows, macOS, and Linux):
 
 | Hook | Script | Purpose |
 | :--- | :--- | :--- |
-| `SessionStart` | `scripts/session-start.js` | Marks root Brain conversation and injects `[Brain & Limbs Protocol Active]`. |
-| `PreToolUse` | `scripts/pre-tool-gate.js` | Intercepts high-bloat direct Brain tool calls (builds, tests, searches, workspace edits, unbounded reads) with a **1-shot redirect** (`soft-gate` default). Exempts subagents, `SKILL.md`/`.agents/`/`.gemini/`, artifacts, and `<=80`-line bounded reads. |
-| `PostToolUse` | `scripts/post-tool-track.js` | Tracks `invoke_subagent` delegations (`fast-editor`, `builder`, `verifier`) and flags unverified edits or Brain drift. |
-| `PreInvocation` | `scripts/pre-invocation.js` | Injects a single, non-repeating drift reminder only when Brain drift occurred (never spams every turn). |
-| `Stop` | `scripts/stop-verify.js` | Prompts once (`continuationActive`-guarded) if workspace edits have not been checked by `verifier`. |
+| `SessionStart` | `scripts/session-start.js` | Marks root Brain conversation, detects OS/shell dialect, and injects 3-tier Total-Cost + Zero-Polling + test-flag rules. |
+| `PreToolUse` | `scripts/pre-tool-gate.js` | Hard-blocks `schedule`/shell polling loops; gates unbounded reads of large files (`>250` lines / `>10 KB`) and broad shell build/test/search floods (routing builds & tests to `verifier`), while permitting direct edits, `<=300`-line reads, small files, `grep_search`, and single-file checks in `soft-gate`. |
+| `PostToolUse` | `scripts/post-tool-track.js` | Tracks Limb spawns, same-file micro-reads, repeat `fast-editor`/`implementer` retries, polling attempts, source vs non-source mutations, and inline `VERIFICATION: PASS` results. |
+| `PreInvocation` | `scripts/pre-invocation.js` | Injects a single, non-repeating drift/escalation notice only when triggered. |
+| `Stop` | `scripts/stop-verify.js` | Skips cleanly on non-source edits or verified mutations (including transcript verification from `verifier`, `implementer`, or `fast-editor`); prompts once (`continuationActive` & per-turn guarded) only if unverified source edits remain. |
 
 ### Configuring Gate Mode (`AGY_EFFICIENCY_MODE`)
 
 Set `AGY_EFFICIENCY_MODE` (or `"mode"` inside `$PLUGIN_DATA/config.json`):
-- **`soft-gate`** *(default)*: Blocks an unmistakable direct Brain violation once per call signature and allows an explicit retry (preventing multi-turn retry loops while stopping accidental context dumps).
-- **`advisory`**: Disables `PreToolUse` denials; relies on rules, `PreInvocation` drift notices, and `Stop` verification reminders.
-- **`strict`**: Blocks all non-exempt direct Brain searches, workspace edits, builds, and tests even on retry.
+- **`soft-gate`** *(default)*: Hard-blocks polling loops; 1-shot redirects unbounded large reads (with exact bounds) and broad shell build/test/search floods; permits direct Brain edits, `<=300`-line reads, small files, `grep_search`, and single-file checks without retry rejections.
+- **`advisory`**: Disables `PreToolUse` denials; relies on rules, `PreInvocation` thrashing/escalation notices, and `Stop` verification.
+- **`strict`**: Blocks all non-exempt direct Brain searches, workspace edits, builds, tests, oversized reads, and polling loops.
 
 ---
 
@@ -60,21 +67,21 @@ Set `AGY_EFFICIENCY_MODE` (or `"mode"` inside `$PLUGIN_DATA/config.json`):
 ```text
 subagent-efficiency/
 ├── plugin.json                        # Plugin manifest (v2.0.0)
-├── hooks.json                         # 5 lifecycle hooks configuration
+├── hooks.json                         # 5 lifecycle hooks configuration (includes schedule)
 ├── assets/
 │   └── logo.svg                       # Square plugin icon
 ├── agents/
-│   ├── code-searcher.md               # Read-only search & exact-line limb
-│   ├── fast-editor.md                 # Targeted editing limb
-│   ├── builder.md                     # Build, compile, typecheck & lint limb
-│   └── verifier.md                    # Test execution & verification limb
+│   ├── code-searcher.md               # flash_lite: single-shot recon, signatures & 6-8 turn cap
+│   ├── implementer.md                 # flash: complex logic, multi-file edits + self-verify
+│   ├── fast-editor.md                 # flash_lite: strictly mechanical edits + self-verify
+│   └── verifier.md                    # flash_lite: consolidated build/lint/test runner
 ├── rules/
-│   └── AGENTS.md                      # Brain & Limbs routing + Red Flags table
+│   └── AGENTS.md                      # 3-tier routing matrix, Zero-Polling, Coarse Batching & Red Flags
 ├── skills/
 │   └── subagent-efficiency/
-│       └── SKILL.md                   # SDO skill & Signal-In/Signal-Out templates
+│       └── SKILL.md                   # 3-tier Signal-In templates & escalation protocol
 ├── scripts/
-│   ├── hook-utils.js                  # Shared state, classification & exemptions
+│   ├── hook-utils.js                  # Read thresholds, polling/shell/source/transcript helpers
 │   ├── session-start.js
 │   ├── pre-tool-gate.js
 │   ├── post-tool-track.js
@@ -82,7 +89,7 @@ subagent-efficiency/
 │   └── stop-verify.js
 ├── tests/
 │   ├── hooks.test.js                  # Unit & stdin/stdout contract tests
-│   └── plugin-validate.test.js        # Manifest, agent & strict CLI checks
+│   └── plugin-validate.test.js        # Manifest, 3-tier agent & strict CLI checks
 ├── .gitignore
 └── README.md
 ```

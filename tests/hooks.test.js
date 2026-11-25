@@ -24,7 +24,7 @@ function runHook(scriptRelPath, payload, envExtra = {}) {
   return JSON.parse(res.stdout.trim());
 }
 
-test('hook-utils classifies build, test, search, and trivial commands', () => {
+test('hook-utils classifies build, test, search, polling, and trivial commands', () => {
   assert.equal(utils.classifyShellCommand('npm test'), 'test');
   assert.equal(utils.classifyShellCommand('npx vitest run tests/a.test.js'), 'test');
   assert.equal(utils.classifyShellCommand('pytest -q'), 'test');
@@ -35,9 +35,15 @@ test('hook-utils classifies build, test, search, and trivial commands', () => {
   assert.equal(utils.classifyShellCommand('Select-String -Pattern bar *.js'), 'search');
   assert.equal(utils.classifyShellCommand('git status -s'), 'trivial');
   assert.equal(utils.classifyShellCommand('pwd'), 'trivial');
+  assert.equal(utils.classifyShellCommand('sleep 15'), 'polling');
+  assert.equal(utils.classifyShellCommand('Start-Sleep -Seconds 10'), 'polling');
+  assert.equal(utils.classifyShellCommand('timeout /t 10'), 'polling');
+  assert.equal(utils.classifyShellCommand('ping -n 5 127.0.0.1'), 'polling');
+  assert.equal(utils.classifyShellCommand('timeout 10 npm test'), 'test');
 });
 
-test('hook-utils exempts SKILL.md, artifacts, and <=80-line bounded reads across Windows/POSIX', () => {
+test('hook-utils exempts SKILL.md, artifacts, <=300-line bounded reads, and small real files (<=250 lines & <=10 KB)', () => {
+  const tmpDir = makeTempStateDir();
   const payload = {
     artifactDirectoryPath: 'C:\\Users\\GNM\\.gemini\\antigravity\\brain\\conv-1',
   };
@@ -50,17 +56,47 @@ test('hook-utils exempts SKILL.md, artifacts, and <=80-line bounded reads across
     true
   );
   assert.equal(
-    utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts', StartLine: 10, EndLine: 89 }, payload),
+    utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts', StartLine: 10, EndLine: 209 }, payload),
     true
   );
   assert.equal(
-    utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts', StartLine: 1, EndLine: 200 }, payload),
+    utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts', StartLine: 1, EndLine: 300 }, payload),
+    true
+  );
+  assert.equal(
+    utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts', StartLine: 1, EndLine: 301 }, payload),
     false
   );
   assert.equal(
     utils.isExemptRead({ Path: 'd:\\repo\\src\\big.ts' }, payload),
     false
   );
+
+  // Small real file (120 lines, < 10 KB) is allowed unbounded
+  const smallFile = path.join(tmpDir, 'small.ts');
+  fs.writeFileSync(smallFile, Array.from({ length: 120 }, (_, i) => `export const v${i} = ${i};`).join('\n'));
+  assert.equal(utils.isExemptRead({ Path: smallFile }, payload), true);
+
+  // Large line-count real file (260 lines, < 10 KB) is blocked unbounded with actionable line bounds
+  const longLinesFile = path.join(tmpDir, 'many-lines.ts');
+  fs.writeFileSync(longLinesFile, Array.from({ length: 260 }, (_, i) => `const a${i} = ${i};`).join('\n'));
+  const longCheck = utils.inspectReadRequest({ Path: longLinesFile }, payload);
+  assert.equal(longCheck.exempt, false);
+  assert.match(longCheck.reason, /260 lines/);
+  assert.match(longCheck.reason, /StartLine: 1, EndLine: 250/);
+
+  // Large byte-size real file (50 lines, > 10 KB) is blocked unbounded
+  const wideFile = path.join(tmpDir, 'wide.ts');
+  fs.writeFileSync(wideFile, Array.from({ length: 50 }, () => 'x'.repeat(250)).join('\n'));
+  assert.equal(utils.isExemptRead({ Path: wideFile }, payload), false);
+  // Bounded <=300 lines on wideFile (<24 KB slice) is allowed
+  assert.equal(utils.isExemptRead({ Path: wideFile, StartLine: 1, EndLine: 50 }, payload), true);
+
+  // Minified single-line mega file (>24 KB on 1 line) is blocked even with StartLine: 1, EndLine: 1
+  const minFile = path.join(tmpDir, 'bundle.min.js');
+  fs.writeFileSync(minFile, 'a'.repeat(30 * 1024));
+  assert.equal(utils.isExemptRead({ Path: minFile, StartLine: 1, EndLine: 1 }, payload), false);
+
   assert.equal(
     utils.isExemptWrite(
       { Path: 'C:/Users/GNM/.gemini/antigravity/brain/conv-1/implementation_plan.md' },
@@ -98,7 +134,27 @@ test('hook-utils detects subagents via transcript step 0 and state', () => {
   );
 });
 
-test('session-start initializes root state and emits Brain & Limbs protocol message', () => {
+test('detectShellEnvironment distinguishes Windows PowerShell 5.1, pwsh 7+, and POSIX shells', () => {
+  const ps51 = utils.detectShellEnvironment({}, 'win32');
+  assert.equal(ps51.dialect, 'windows-powershell-5.1');
+  assert.equal(ps51.supportsAndAnd, false);
+  assert.match(ps51.shellHint, /NEVER use '&&'/);
+  assert.match(ps51.shellHint, /\$LASTEXITCODE/);
+  assert.match(ps51.testHint, /vitest run/);
+
+  const pwsh = utils.detectShellEnvironment(
+    { POWERSHELL_DISTRIBUTION_CHANNEL: 'MSI:Windows 10' },
+    'win32'
+  );
+  assert.equal(pwsh.dialect, 'pwsh');
+  assert.equal(pwsh.supportsAndAnd, true);
+
+  const linuxBash = utils.detectShellEnvironment({ SHELL: '/bin/bash' }, 'linux');
+  assert.equal(linuxBash.dialect, 'bash');
+  assert.equal(linuxBash.supportsAndAnd, true);
+});
+
+test('session-start initializes root state and emits 3-tier Total-Cost, Zero-Polling, and OS shell contract', () => {
   const stateDir = makeTempStateDir();
   const transcript = path.join(stateDir, 'root.jsonl');
   fs.writeFileSync(
@@ -117,15 +173,19 @@ test('session-start initializes root state and emits Brain & Limbs protocol mess
   assert.ok(Array.isArray(out.injectSteps) && out.injectSteps.length === 1);
   const msg = out.injectSteps[0].systemMessage.systemMessage;
   assert.match(msg, /Brain & Limbs/i);
+  assert.match(msg, /Total Cost/i);
+  assert.match(msg, /Zero-Polling/i);
+  assert.match(msg, /vitest run/i);
   assert.match(msg, /code-searcher/);
+  assert.match(msg, /implementer/);
   assert.match(msg, /fast-editor/);
-  assert.match(msg, /builder/);
   assert.match(msg, /verifier/);
+  assert.doesNotMatch(msg, /\bbuilder\b/);
   const saved = utils.loadState('root-conv-1', stateDir);
   assert.equal(saved.isSubagent, false);
 });
 
-test('pre-tool-gate blocks high-bloat Brain calls once (1-shot) and allows retry in soft-gate mode', () => {
+test('pre-tool-gate blocks broad Brain shell calls once (1-shot) and allows retry in soft-gate mode', () => {
   const stateDir = makeTempStateDir();
   const payload = {
     conversationId: 'conv-gate-1',
@@ -142,7 +202,148 @@ test('pre-tool-gate blocks high-bloat Brain calls once (1-shot) and allows retry
   assert.equal(second.decision, 'allow');
 });
 
-test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, respects strict & advisory modes, and bypasses subagents', () => {
+test('pre-tool-gate avoids turn-wasting hard rejections for soft-gate edits, quick grep_search, and targeted single-file checks', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+
+  assert.equal(
+    runHook(
+      'scripts/pre-tool-gate.js',
+      {
+        conversationId: 'conv-soft-direct',
+        stepIdx: 1,
+        lastUserInput: 'fix bug',
+        toolCall: { name: 'edit_file', args: { Path: 'd:/repo/src/lib.rs', Replacement: 'let x = 1;' } },
+      },
+      env
+    ).decision,
+    'allow'
+  );
+
+  assert.equal(
+    runHook(
+      'scripts/pre-tool-gate.js',
+      {
+        conversationId: 'conv-soft-direct',
+        stepIdx: 2,
+        lastUserInput: 'fix bug',
+        toolCall: { name: 'grep_search', args: { Query: 'MyStruct' } },
+      },
+      env
+    ).decision,
+    'allow'
+  );
+
+  assert.equal(
+    runHook(
+      'scripts/pre-tool-gate.js',
+      {
+        conversationId: 'conv-soft-direct',
+        stepIdx: 3,
+        lastUserInput: 'fix bug',
+        toolCall: { name: 'run_command', args: { CommandLine: 'npx vitest run tests/auth.test.ts' } },
+      },
+      env
+    ).decision,
+    'allow'
+  );
+
+  assert.equal(
+    runHook(
+      'scripts/pre-tool-gate.js',
+      {
+        conversationId: 'conv-soft-direct',
+        stepIdx: 4,
+        lastUserInput: 'fix bug',
+        toolCall: { name: 'run_command', args: { CommandLine: 'rg -l "MyStruct" src/' } },
+      },
+      env
+    ).decision,
+    'allow'
+  );
+});
+
+test('pre-tool-gate enforces polling guard persistently against schedule and shell sleep polling, while allowing cron daemons', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+  const convId = 'conv-poll-1';
+
+  // Simulate active subagent delegation in this turn
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: convId,
+      stepIdx: 1,
+      lastUserInput: 'build app',
+      toolCall: { name: 'invoke_subagent', args: { TypeName: 'code-searcher', Prompt: 'find auth' } },
+    },
+    env
+  );
+
+  const poll1 = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: convId,
+      stepIdx: 2,
+      lastUserInput: 'build app',
+      toolCall: {
+        name: 'schedule',
+        args: { DurationSeconds: 15, TimerCondition: 'any', Prompt: 'Check subagent status' },
+      },
+    },
+    env
+  );
+  assert.equal(poll1.decision, 'deny');
+  assert.match(poll1.reason, /Zero-Polling/);
+
+  // Repeating or tweaking DurationSeconds must STILL be denied
+  const poll2 = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: convId,
+      stepIdx: 3,
+      lastUserInput: 'build app',
+      toolCall: {
+        name: 'schedule',
+        args: { DurationSeconds: 20, Prompt: 'Wait for worker' },
+      },
+    },
+    env
+  );
+  assert.equal(poll2.decision, 'deny');
+
+  // Shell sleep polling is denied
+  const sleepPoll = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: convId,
+      stepIdx: 4,
+      lastUserInput: 'build app',
+      toolCall: { name: 'run_command', args: { CommandLine: 'Start-Sleep -Seconds 10' } },
+    },
+    env
+  );
+  assert.equal(sleepPoll.decision, 'deny');
+  assert.match(sleepPoll.reason, /Zero-Polling/);
+
+  // Legitimate recurring cron daemon is allowed
+  const cronOk = runHook(
+    'scripts/pre-tool-gate.js',
+    {
+      conversationId: convId,
+      stepIdx: 5,
+      lastUserInput: 'build app',
+      toolCall: {
+        name: 'schedule',
+        args: { CronExpression: '0 9 * * *', IsDaemon: true, Prompt: 'Daily summary' },
+      },
+    },
+    env
+  );
+  assert.equal(cronOk.decision, 'allow');
+});
+
+test('pre-tool-gate routes build/unbounded-read to consolidated limbs, respects strict & advisory modes, and bypasses subagents', () => {
   const stateDir = makeTempStateDir();
   const env = { PLUGIN_DATA: stateDir };
 
@@ -157,7 +358,7 @@ test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, resp
     env
   );
   assert.equal(buildRes.decision, 'deny');
-  assert.match(buildRes.reason, /builder/);
+  assert.match(buildRes.reason, /verifier/);
 
   const readRes = runHook(
     'scripts/pre-tool-gate.js',
@@ -171,31 +372,51 @@ test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, resp
   );
   assert.equal(readRes.decision, 'deny');
   assert.match(readRes.reason, /code-searcher/);
+  assert.match(readRes.reason, /StartLine: 1, EndLine: 250/);
 
-  const smallRead = runHook(
+  const mediumRead = runHook(
     'scripts/pre-tool-gate.js',
     {
       conversationId: 'conv-gate-2',
       stepIdx: 3,
       lastUserInput: 'build',
-      toolCall: { name: 'read_file', args: { Path: 'd:/repo/src/app.ts', StartLine: 1, EndLine: 50 } },
+      toolCall: { name: 'read_file', args: { Path: 'd:/repo/src/app.ts', StartLine: 1, EndLine: 250 } },
     },
     env
   );
-  assert.equal(smallRead.decision, 'allow');
+  assert.equal(mediumRead.decision, 'allow');
 
   const strictEnv = { PLUGIN_DATA: stateDir, AGY_EFFICIENCY_MODE: 'strict' };
-  const strictPayload = {
+  const strictSmallPayload = {
     conversationId: 'conv-strict',
     stepIdx: 1,
     lastUserInput: 'edit',
-    toolCall: { name: 'edit_file', args: { Path: 'd:/repo/src/a.ts' } },
+    toolCall: { name: 'edit_file', args: { Path: 'd:/repo/src/a.ts', Replacement: 'const x = 1;' } },
   };
-  assert.equal(runHook('scripts/pre-tool-gate.js', strictPayload, strictEnv).decision, 'deny');
-  assert.equal(runHook('scripts/pre-tool-gate.js', strictPayload, strictEnv).decision, 'deny');
+  const strictSmallDeny = runHook('scripts/pre-tool-gate.js', strictSmallPayload, strictEnv);
+  assert.equal(strictSmallDeny.decision, 'deny');
+  assert.match(strictSmallDeny.reason, /fast-editor/);
+  assert.equal(runHook('scripts/pre-tool-gate.js', strictSmallPayload, strictEnv).decision, 'deny');
+
+  const strictLargePayload = {
+    conversationId: 'conv-strict',
+    stepIdx: 2,
+    lastUserInput: 'edit',
+    toolCall: {
+      name: 'write_file',
+      args: {
+        Path: 'd:/repo/src/feature.ts',
+        Content: Array.from({ length: 45 }, (_, i) => `export const line${i} = ${i};`).join('\n'),
+      },
+    },
+  };
+  const strictLargeDeny = runHook('scripts/pre-tool-gate.js', strictLargePayload, strictEnv);
+  assert.equal(strictLargeDeny.decision, 'deny');
+  assert.match(strictLargeDeny.reason, /implementer/);
+  assert.match(strictLargeDeny.reason, /'flash'/);
 
   assert.equal(
-    runHook('scripts/pre-tool-gate.js', strictPayload, {
+    runHook('scripts/pre-tool-gate.js', strictSmallPayload, {
       PLUGIN_DATA: stateDir,
       AGY_EFFICIENCY_MODE: 'advisory',
     }).decision,
@@ -210,14 +431,146 @@ test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, resp
   assert.equal(
     runHook(
       'scripts/pre-tool-gate.js',
-      { ...strictPayload, conversationId: 'sub-conv', transcriptPath: subTranscript },
+      { ...strictSmallPayload, conversationId: 'sub-conv', transcriptPath: subTranscript },
       strictEnv
     ).decision,
     'allow'
   );
 });
 
-test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and prevents loops', () => {
+test('post-tool-track detects same-file micro-reads, fast-editor -> implementer -> Brain escalation, and high Limb counts', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+
+  // 1) >3 micro-reads on the same file
+  const microConv = 'conv-thrash-reads';
+  for (let i = 1; i <= 3; i++) {
+    runHook(
+      'scripts/post-tool-track.js',
+      {
+        conversationId: microConv,
+        stepIdx: i,
+        lastUserInput: 'inspect lib.rs',
+        toolCall: {
+          name: 'read_file',
+          args: { Path: 'd:/repo/src/lib.rs', StartLine: (i - 1) * 80 + 1, EndLine: i * 80 },
+        },
+      },
+      env
+    );
+    assert.equal(utils.loadState(microConv, stateDir).pendingDriftNudge, null);
+  }
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: microConv,
+      stepIdx: 4,
+      lastUserInput: 'inspect lib.rs',
+      toolCall: {
+        name: 'read_file',
+        args: { Path: 'd:/repo/src/lib.rs', StartLine: 241, EndLine: 300 },
+      },
+    },
+    env
+  );
+  const readNudge = utils.loadState(microConv, stateDir).pendingDriftNudge;
+  assert.match(readNudge, /300 lines/);
+  assert.match(readNudge, /lib\.rs/);
+
+  // 2) >2 fast-editor retries on the same file -> escalate to implementer
+  const editConv = 'conv-thrash-fast-edits';
+  for (let i = 1; i <= 2; i++) {
+    runHook(
+      'scripts/post-tool-track.js',
+      {
+        conversationId: editConv,
+        stepIdx: i,
+        lastUserInput: 'fix parser',
+        toolCall: {
+          name: 'invoke_subagent',
+          args: { TypeName: 'fast-editor', Prompt: 'TARGET: src/parser.rs:L10-L30' },
+        },
+      },
+      env
+    );
+    assert.equal(utils.loadState(editConv, stateDir).pendingDriftNudge, null);
+  }
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: editConv,
+      stepIdx: 3,
+      lastUserInput: 'fix parser',
+      toolCall: {
+        name: 'invoke_subagent',
+        args: { TypeName: 'fast-editor', Prompt: 'TARGET: src/parser.rs:L10-L30' },
+      },
+    },
+    env
+  );
+  const fastEditNudge = utils.loadState(editConv, stateDir).pendingDriftNudge;
+  assert.match(fastEditNudge, /parser\.rs/);
+  assert.match(fastEditNudge, /implementer/);
+
+  // 3) >2 implementer retries on the same file -> Brain takes over directly
+  const implConv = 'conv-thrash-impl-edits';
+  for (let i = 1; i <= 2; i++) {
+    runHook(
+      'scripts/post-tool-track.js',
+      {
+        conversationId: implConv,
+        stepIdx: i,
+        lastUserInput: 'fix engine',
+        toolCall: {
+          name: 'invoke_subagent',
+          args: { TypeName: 'implementer', Prompt: 'TARGET: src/engine.rs:L40-L120' },
+        },
+      },
+      env
+    );
+    assert.equal(utils.loadState(implConv, stateDir).pendingDriftNudge, null);
+  }
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: implConv,
+      stepIdx: 3,
+      lastUserInput: 'fix engine',
+      toolCall: {
+        name: 'invoke_subagent',
+        args: { TypeName: 'implementer', Prompt: 'TARGET: src/engine.rs:L40-L120' },
+      },
+    },
+    env
+  );
+  const implNudge = utils.loadState(implConv, stateDir).pendingDriftNudge;
+  assert.match(implNudge, /engine\.rs/);
+  assert.match(implNudge, /implementer/);
+  assert.match(implNudge, /directly/i);
+
+  // 4) >15 Limb spawns in one turn triggers coarse-batching nudge
+  const limbConv = 'conv-thrash-limbs';
+  for (let i = 1; i <= 16; i++) {
+    runHook(
+      'scripts/post-tool-track.js',
+      {
+        conversationId: limbConv,
+        stepIdx: i,
+        lastUserInput: 'big task',
+        toolCall: {
+          name: 'invoke_subagent',
+          args: { TypeName: 'code-searcher', Prompt: `find symbol_${i}` },
+        },
+      },
+      env
+    );
+  }
+  const limbNudge = utils.loadState(limbConv, stateDir).pendingDriftNudge;
+  assert.match(limbNudge, /High Limb count/);
+  assert.match(limbNudge, /16/);
+});
+
+test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits, prevents loops, and avoids false Stop rejections', () => {
   const stateDir = makeTempStateDir();
   const env = { PLUGIN_DATA: stateDir };
   const convId = 'conv-lifecycle-1';
@@ -228,7 +581,8 @@ test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and 
       {
         conversationId: convId,
         stepIdx: 10,
-        toolCall: { name: 'invoke_subagent', args: { TypeName: 'fast-editor' } },
+        lastUserInput: 'implement feature',
+        toolCall: { name: 'invoke_subagent', args: { TypeName: 'fast-editor', Prompt: 'edit src/main.ts' } },
       },
       env
     ),
@@ -249,6 +603,22 @@ test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and 
   );
   assert.equal(stop1.decision, 'continue');
   assert.match(stop1.reason, /verifier/);
+
+  // Same user turn should not fire Stop rejection a second time even if continuationActive were false
+  assert.deepEqual(
+    runHook(
+      'scripts/stop-verify.js',
+      {
+        conversationId: convId,
+        executionNum: 2,
+        terminationReason: 'NO_TOOL_CALL',
+        fullyIdle: true,
+        continuationActive: false,
+      },
+      env
+    ),
+    {}
+  );
 
   assert.deepEqual(
     runHook(
@@ -285,6 +655,7 @@ test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and 
     {
       conversationId: convId,
       stepIdx: 11,
+      lastUserInput: 'implement feature',
       toolCall: { name: 'invoke_subagent', args: { TypeName: 'verifier' } },
     },
     env
@@ -304,6 +675,152 @@ test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and 
     ),
     {}
   );
+});
+
+test('stop-verify handles non-source edits, implementer/fast-editor inline & transcript VERIFICATION: PASS, and subsequent mutations', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+
+  // 1) Docs-only edit does NOT require verifier
+  const docsConv = 'conv-docs-only';
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: docsConv,
+      stepIdx: 1,
+      lastUserInput: 'update docs',
+      toolCall: { name: 'edit_file', args: { Path: 'd:/repo/README.md', Replacement: '# Hi' } },
+    },
+    env
+  );
+  assert.equal(utils.loadState(docsConv, stateDir).unverifiedEdits, false);
+  assert.deepEqual(
+    runHook('scripts/stop-verify.js', { conversationId: docsConv, terminationReason: 'NO_TOOL_CALL' }, env),
+    {}
+  );
+
+  // 2) Inline edit-and-verify implementer result clears unverifiedEdits
+  const inlineConv = 'conv-inline-verify';
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: inlineConv,
+      stepIdx: 2,
+      lastUserInput: 'edit src',
+      toolCall: { name: 'invoke_subagent', args: { TypeName: 'implementer', Prompt: 'edit src/a.ts' } },
+      toolResponse: 'STATUS: OK\nLOCATIONS:\n- src/a.ts:L1-L50\nVERIFICATION: PASS (npx tsc --noEmit)',
+    },
+    env
+  );
+  assert.equal(utils.loadState(inlineConv, stateDir).unverifiedEdits, false);
+
+  // 3) Async transcript verification from implementer after mutation resolves Stop cleanly
+  const trConv = 'conv-transcript-verify';
+  const trPath = path.join(stateDir, 'tr-verify.jsonl');
+  fs.writeFileSync(
+    trPath,
+    [
+      JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT' }),
+      JSON.stringify({
+        step_index: 5,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        tool_calls: [{ name: 'invoke_subagent', args: { TypeName: 'implementer', Prompt: 'src/x.rs' } }],
+      }),
+      JSON.stringify({
+        step_index: 6,
+        source: 'SYSTEM_SDK',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: 'STATUS: OK\nLOCATIONS:\n- src/x.rs:L10-L60\nVERIFICATION: PASS (cargo test x_unit)',
+      }),
+    ].join('\n') + '\n'
+  );
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: trConv,
+      stepIdx: 5,
+      transcriptPath: trPath,
+      lastUserInput: 'fix x',
+      toolCall: { name: 'invoke_subagent', args: { TypeName: 'implementer', Prompt: 'src/x.rs' } },
+    },
+    env
+  );
+  assert.equal(utils.loadState(trConv, stateDir).unverifiedEdits, true);
+  assert.deepEqual(
+    runHook(
+      'scripts/stop-verify.js',
+      { conversationId: trConv, transcriptPath: trPath, terminationReason: 'NO_TOOL_CALL' },
+      env
+    ),
+    {}
+  );
+
+  // 4) Later implementer mutation AFTER an earlier pass still triggers Stop verification
+  const trLateConv = 'conv-transcript-late-mut';
+  const trLatePath = path.join(stateDir, 'tr-late-mut.jsonl');
+  fs.writeFileSync(
+    trLatePath,
+    [
+      JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT' }),
+      JSON.stringify({
+        step_index: 4,
+        source: 'SYSTEM_SDK',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: 'STATUS: OK\nCOUNTS: passed=5 failed=0 skipped=0',
+      }),
+      JSON.stringify({
+        step_index: 7,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        tool_calls: [{ name: 'invoke_subagent', args: { TypeName: 'implementer', Prompt: 'src/y.rs' } }],
+      }),
+    ].join('\n') + '\n'
+  );
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: trLateConv,
+      stepIdx: 7,
+      transcriptPath: trLatePath,
+      lastUserInput: 'update y',
+      toolCall: { name: 'invoke_subagent', args: { TypeName: 'implementer', Prompt: 'src/y.rs' } },
+    },
+    env
+  );
+  const lateStop = runHook(
+    'scripts/stop-verify.js',
+    { conversationId: trLateConv, transcriptPath: trLatePath, terminationReason: 'NO_TOOL_CALL' },
+    env
+  );
+  assert.equal(lateStop.decision, 'continue');
+
+  // 5) Failed direct test run (payload.error set) must NOT mark edits verified
+  const failConv = 'conv-failed-test';
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: failConv,
+      stepIdx: 1,
+      lastUserInput: 'edit & test',
+      toolCall: { name: 'edit_file', args: { Path: 'd:/repo/src/x.ts', Replacement: 'bad' } },
+    },
+    env
+  );
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: failConv,
+      stepIdx: 2,
+      lastUserInput: 'edit & test',
+      error: 'exit status 1',
+      toolCall: { name: 'run_command', args: { CommandLine: 'npm test' } },
+    },
+    env
+  );
+  assert.equal(utils.loadState(failConv, stateDir).unverifiedEdits, true);
 });
 
 test('pre-invocation emits drift nudge at most once and clears flag immediately', () => {
@@ -327,7 +844,7 @@ test('pre-invocation emits drift nudge at most once and clears flag immediately'
     env
   );
   assert.ok(Array.isArray(inv1.injectSteps) && inv1.injectSteps.length === 1);
-  assert.match(inv1.injectSteps[0].systemMessage.systemMessage, /builder/i);
+  assert.match(inv1.injectSteps[0].systemMessage.systemMessage, /verifier/i);
 
   const inv2 = runHook(
     'scripts/pre-invocation.js',
@@ -337,7 +854,7 @@ test('pre-invocation emits drift nudge at most once and clears flag immediately'
   assert.deepEqual(inv2, {});
 });
 
-test('hooks.json configures all 5 lifecycle events cleanly', () => {
+test('hooks.json configures all 5 lifecycle events cleanly and includes schedule matcher', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks.json'), 'utf8'));
   const cfg = hooks['subagent-efficiency'];
   assert.ok(cfg);
@@ -346,6 +863,8 @@ test('hooks.json configures all 5 lifecycle events cleanly', () => {
   assert.ok(Array.isArray(cfg.PostToolUse) && cfg.PostToolUse.length === 1);
   assert.ok(Array.isArray(cfg.PreInvocation) && cfg.PreInvocation.length === 1);
   assert.ok(Array.isArray(cfg.Stop) && cfg.Stop.length === 1);
+  assert.match(cfg.PreToolUse[0].matcher, /\bschedule\b/);
+  assert.match(cfg.PostToolUse[0].matcher, /\bschedule\b/);
 });
 
 test('isSubagent handles >4KB first line in transcript.jsonl without truncation', () => {
@@ -359,7 +878,7 @@ test('isSubagent handles >4KB first line in transcript.jsonl without truncation'
   assert.equal(utils.isSubagent({ conversationId: 'sub-big', transcriptPath: subTranscript }, {}), true);
 });
 
-test('isExemptRead rejects null, empty string, and zero StartLine/EndLine', () => {
+test('isExemptRead rejects null, empty string, and zero StartLine/EndLine on unknown files', () => {
   const payload = { artifactDirectoryPath: '' };
   assert.equal(
     utils.isExemptRead({ Path: 'd:/repo/src/big.ts', StartLine: null, EndLine: null }, payload),

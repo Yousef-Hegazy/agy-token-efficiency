@@ -7,51 +7,90 @@ const {
   getMode,
   loadState,
   saveState,
+  syncTurnState,
   isSubagent,
-  isExemptRead,
+  inspectReadRequest,
   isExemptWrite,
+  estimateEditLines,
   classifyShellCommand,
+  isTargetedShellCheck,
+  isScopedShellSearch,
+  isPollingSchedule,
   buildCallSignature,
   emitJson,
 } = require('./hook-utils');
 
-function classifyDirectViolation(toolName, args, payload) {
+function classifyDirectViolation(toolName, args, payload, mode, state) {
+  if (toolName === 'schedule') {
+    const poll = isPollingSchedule(args, state);
+    if (poll.isPolling) {
+      return {
+        limb: 'reactive-wakeup',
+        persistent: true,
+        isPolling: true,
+        why: `Zero-Polling Rule: ${poll.reason}. End your turn without timers—Antigravity wakes Brain automatically when subagents finish.`,
+      };
+    }
+    return null;
+  }
+
   if (toolName === 'run_command') {
     const cmd = args.CommandLine || '';
     const kind = classifyShellCommand(cmd);
+    if (kind === 'polling') {
+      return {
+        limb: 'reactive-wakeup',
+        persistent: true,
+        isPolling: true,
+        why: 'Zero-Polling Rule: Shell sleep/timeout polling wastes turns. End your turn and wait passively for subagent completion.',
+      };
+    }
     if (kind === 'test') {
+      if (mode === 'soft-gate' && isTargetedShellCheck(cmd)) return null;
       return {
         limb: 'verifier',
-        why: 'Direct test command floods Brain context with raw test logs.',
+        model: 'flash_lite',
+        why: 'Broad test suites flood Brain context with raw test logs.',
       };
     }
     if (kind === 'build') {
+      if (mode === 'soft-gate' && isTargetedShellCheck(cmd)) return null;
       return {
-        limb: 'builder',
-        why: 'Direct build/lint/typecheck floods Brain context with compiler output.',
+        limb: 'verifier',
+        model: 'flash_lite',
+        why: 'Broad build/lint/typecheck commands flood Brain context with compiler output.',
       };
     }
     if (kind === 'search') {
+      if (mode === 'soft-gate' && isScopedShellSearch(cmd)) return null;
       return {
         limb: 'code-searcher',
-        why: 'Direct recursive search floods Brain context with match lines.',
+        model: 'flash_lite',
+        why: 'Direct recursive shell search floods Brain context with match lines.',
       };
     }
     return null;
   }
 
   if (toolName === 'grep_search' || toolName === 'find_by_name') {
-    return {
-      limb: 'code-searcher',
-      why: 'Repository search belongs in code-searcher.',
-    };
+    if (mode === 'strict') {
+      return {
+        limb: 'code-searcher',
+        model: 'flash_lite',
+        why: 'Repository search belongs in code-searcher.',
+      };
+    }
+    // Avoid turn-wasting hard rejections on quick IDE searches in soft-gate.
+    return null;
   }
 
   if (toolName === 'read_file' || toolName === 'view_file') {
-    if (isExemptRead(args, payload)) return null;
+    const readCheck = inspectReadRequest(args, payload);
+    if (readCheck.exempt) return null;
     return {
       limb: 'code-searcher',
-      why: 'Unbounded or large file reads bloat Brain context.',
+      model: 'flash_lite',
+      why: readCheck.reason,
     };
   }
 
@@ -63,10 +102,19 @@ function classifyDirectViolation(toolName, args, payload) {
     toolName === 'write_to_file'
   ) {
     if (isExemptWrite(args, payload)) return null;
-    return {
-      limb: 'fast-editor',
-      why: 'Workspace code edits belong in fast-editor.',
-    };
+    if (mode === 'strict') {
+      const lines = estimateEditLines(toolName, args);
+      const useMidTier = lines > 30 || toolName === 'multi_replace_file_content';
+      return {
+        limb: useMidTier ? 'implementer' : 'fast-editor',
+        model: useMidTier ? 'flash' : 'flash_lite',
+        why: useMidTier
+          ? 'Large or multi-hunk workspace code edits belong in implementer.'
+          : 'Mechanical workspace code edits belong in fast-editor.',
+      };
+    }
+    // In soft-gate, Brain edits surgical/hard debugging fixes directly without a retry rejection.
+    return null;
   }
 
   return null;
@@ -86,22 +134,30 @@ async function main() {
     return emitJson({ decision: 'allow' });
   }
 
-  const userInput = typeof payload.lastUserInput === 'string' ? payload.lastUserInput : '';
-  if (userInput && state.lastUserInput && state.lastUserInput !== userInput) {
-    state.warnedSignatures = {};
-    state.stopWarnedAtStep = null;
-  }
-  if (userInput) state.lastUserInput = userInput;
+  syncTurnState(state, payload.lastUserInput);
 
   const toolCall = payload.toolCall || {};
   const toolName = toolCall.name || '';
   const args = toolCall.args || {};
 
-  const violation = classifyDirectViolation(toolName, args, payload);
-  if (!violation) return emitJson({ decision: 'allow' });
+  const violation = classifyDirectViolation(toolName, args, payload, mode, state);
+  if (!violation) {
+    saveState(convId, state, stateDir);
+    return emitJson({ decision: 'allow' });
+  }
+
+  if (violation.isPolling) {
+    state.pollingAttempts += 1;
+    state.directBloatCount += 1;
+    saveState(convId, state, stateDir);
+    return emitJson({
+      decision: 'deny',
+      reason: `[Brain & Limbs] ${violation.why}`,
+    });
+  }
 
   const sig = buildCallSignature(toolName, args);
-  if (mode === 'soft-gate' && state.warnedSignatures[sig]) {
+  if (mode === 'soft-gate' && !violation.persistent && state.warnedSignatures[sig]) {
     saveState(convId, state, stateDir);
     return emitJson({ decision: 'allow' });
   }
@@ -111,12 +167,13 @@ async function main() {
 
   const retryHint =
     mode === 'soft-gate'
-      ? ' (If a direct call is strictly required, repeating this exact call will be permitted.)'
+      ? ' (If strictly required, repeating this exact call will be permitted.)'
       : '';
+  const modelId = violation.model || 'flash_lite';
 
   return emitJson({
     decision: 'deny',
-    reason: `[Brain & Limbs] ${violation.why} Delegate to '${violation.limb}' via invoke_subagent (Model: 'flash_lite') requesting exact file:line locations.${retryHint}`,
+    reason: `[Brain & Limbs] ${violation.why} Or delegate to '${violation.limb}' via invoke_subagent (Model: '${modelId}').${retryHint}`,
   });
 }
 

@@ -8,6 +8,7 @@ const {
   loadState,
   saveState,
   isSubagent,
+  detectShellEnvironment,
   emitJson,
 } = require('./hook-utils');
 
@@ -33,18 +34,21 @@ async function main() {
   state.isSubagent = false;
   saveState(convId, state, stateDir);
 
+  const envInfo = detectShellEnvironment();
+
   return emitJson({
     injectSteps: [
       {
         systemMessage: {
           systemMessage:
-            '[Brain & Limbs Protocol Active]\n' +
-            'Act strictly as the orchestrator (Brain). Delegate execution to pre-registered flash_lite Limbs via invoke_subagent:\n' +
-            "- 'code-searcher': File discovery, symbol grep, multi-line/full-file reads.\n" +
-            "- 'fast-editor': Targeted code edits, refactors, docstrings, file writes.\n" +
-            "- 'builder': Builds, compiles, typechecks, linters (returns exact file:line error digests).\n" +
-            "- 'verifier': Test suites, diff/requirement checks, anti-cheat assertion verification.\n" +
-            'Send crisp TARGET/TASK/DETAIL_LEVEL signals; request exact_lines/exact_snippets when needed. Escalate to flash only after repeated failure.',
+            '[Brain & Limbs Protocol Active — 3-Tier Total-Cost Balanced]\n' +
+            'Optimize Total Cost = (Brain_Turns x Avg_Context) + Limb_Cold_Starts (target <=10-15 Limbs/task).\n' +
+            '- Brain (top-tier): planning, hard debugging, bounded reads <=300 lines (or small files <=250 lines / 10 KB), and <50-line surgical edits in context.\n' +
+            "- Mid-tier (Model: 'flash'): 'implementer' for complex/type-heavy logic & large/multi-file edits (+ targeted self-verify).\n" +
+            "- Lite-tier (Model: 'flash_lite'): 'code-searcher' (1 comprehensive batch + verbatim signatures/imports), 'fast-editor' (strictly mechanical/boilerplate), 'verifier' (all builds/lints/tests/diff checks).\n" +
+            '- Zero-Polling Rule: NEVER use schedule/sleep timers to poll subagents—end turn and wait for automatic wakeup.\n' +
+            `- ${envInfo.shellHint}\n` +
+            `- ${envInfo.testHint}`,
         },
       },
     ],

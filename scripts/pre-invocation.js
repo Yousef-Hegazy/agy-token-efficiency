@@ -6,6 +6,7 @@ const {
   getStateDir,
   loadState,
   saveState,
+  syncTurnState,
   isSubagent,
   emitJson,
 } = require('./hook-utils');
@@ -16,7 +17,14 @@ async function main() {
   const stateDir = getStateDir();
   const state = loadState(convId, stateDir);
 
-  if (isSubagent(payload, state) || !state.pendingDriftNudge) {
+  if (isSubagent(payload, state)) {
+    return emitJson({});
+  }
+
+  syncTurnState(state, payload.lastUserInput);
+
+  if (!state.pendingDriftNudge) {
+    saveState(convId, state, stateDir);
     return emitJson({});
   }
 
