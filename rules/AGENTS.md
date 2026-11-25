@@ -1,50 +1,45 @@
-# Token-Efficiency Subagents: Delegation Rules
+# Brain & Limbs Token-Efficiency Rules
 
-To conserve token budget, minimize context window saturation, and reduce latency across Antigravity 2.0, Antigravity IDE, and CLI sessions, the agent MUST enforce hierarchical delegation for codebase search and mechanical code editing tasks.
-
----
-
-## 1. Subagent Specifications
-
-### A. Code Searcher (`code-searcher`)
-- **Model**: `flash_lite` (ultra-low reasoning, fast, minimal token cost)
-- **Permissions**: Read-only (`EnableWriteTools: false`, `EnableMCPTools: false`, `EnableSubagentTools: false`)
-- **System Prompt**: Ultra-fast codebase searcher that returns file paths, exact line numbers, and brief (2-5 line) code excerpts. Never dumps full files into parent context.
-- **Role**: Codebase Searcher
-
-### B. Fast Code Editor (`fast-editor`)
-- **Model**: `flash_lite` (or `flash` for moderate multi-line edits)
-- **Permissions**: Write-enabled (`EnableWriteTools: true`, `EnableMCPTools: false`, `EnableSubagentTools: false`)
-- **System Prompt**: Direct code modifier using `edit_file` / `write_file`. No conversational filler or verbose chain-of-thought explanations. Directly applies changes and reports concise summaries.
-- **Role**: Fast Code Editor
+**Violating the letter of this protocol wastes context across every future turn.**
+The primary model is the **Brain** (architect, planner, synthesizer). Pre-registered `flash_lite` subagents are the **Limbs** (actors). Keep raw files, grep hits, compiler logs, and test dumps OUT of Brain context.
 
 ---
 
-## 2. Delegation Decision Matrix
+## 1. Brain & Limbs Routing Matrix
 
-| Task Category | Threshold | Responsible Agent | Model |
+| Task | Limb (`invoke_subagent`) | Default Model | Output Returned to Brain |
 | :--- | :--- | :--- | :--- |
-| **Code / File Search** | Any search across files, finding symbols, regex/grep, scanning project hierarchy | `code-searcher` | `flash_lite` |
-| **Small / Medium Edits** | 1–3 files, localized changes (<100 lines/file), docstrings, type hints, typo fixes, repetitive edits | `fast-editor` | `flash_lite` |
-| **Moderate Refactoring** | Multi-function updates or boilerplate expansion with established patterns | `fast-editor` | `flash` |
-| **Deep Reasoning & Architecture** | System design, complex multi-file planning, high-ambiguity bugs, complex algorithms | Primary Agent | Primary Model |
-| **User Interaction** | Final responses, explanations, synthesizing findings for the user | Primary Agent | Primary Model |
+| **Search, grep, trace, read >80 lines** | `code-searcher` | `flash_lite` | `STATUS`, exact `file:line` ranges, requested snippets |
+| **Create, edit, refactor, docstrings** | `fast-editor` | `flash_lite` | `STATUS`, modified `file:line` ranges, concise summary |
+| **Build, compile, typecheck, lint** | `builder` | `flash_lite` | `STATUS`, exit code, `file:line:col` error digest |
+| **Test suites, verification, diff audit** | `verifier` | `flash_lite` | `STATUS`, pass/fail counts, failing `file:line` locations |
+| **Live browser / UI checks** | `browser` | `flash` | Visual/console check summary |
+| **Design, synthesis, user replies** | Primary Agent (Brain) | Primary | Final decisions & user responses |
+
+All 4 plugin Limbs are pre-registered natively via `agents/*.md` — invoke them directly with `invoke_subagent` (no `define_subagent` needed).
 
 ---
 
-## 3. Strict Rules & Anti-Patterns
+## 2. Signal-In / Signal-Out & Escalation
 
-1. **DO NOT read entire files into the primary context to search for symbols.**
-   - *Violation*: Primary agent running `read_file` on multiple files just to locate a function definition or grep for a variable.
-   - *Correct Action*: Delegate to `code-searcher`. The subagent inspects files in an isolated context and returns only the file path, line numbers, and short snippet.
+1. **Send crisp signals:** Give each Limb `TARGET`, `TASK`, `DETAIL_LEVEL` (`summary` | `exact_lines` | `exact_snippets`), and `CONSTRAINTS`. Request `exact_lines` or `exact_snippets` whenever you need exact line numbers or verbatim code for a follow-up edit.
+2. **Cheapest first (`flash_lite`), escalate only on failure:** Always invoke Limbs with `Model: 'flash_lite'`. Escalate a specific retry to `Model: 'flash'` only if `flash_lite` returns `AMBIGUOUS` or fails twice on the same task.
+3. **Fulfill other skills via Limbs:** When another workflow/skill says "search with `rg`", "run the build", or "run tests and verify", execute that step by invoking `code-searcher`, `builder`, or `verifier`—not directly in Brain context.
 
-2. **DO NOT perform mechanical edits with high-effort reasoning models.**
-   - *Violation*: The primary agent (running on a high-tier/high-reasoning model) generating massive code blocks for localized edits or docstrings.
-   - *Correct Action*: Delegate to `fast-editor` with `Model: 'flash_lite'` and exact diff instructions.
+---
 
-3. **Subagent Auto-Registration**:
-   - If `code-searcher` or `fast-editor` have not been defined in the current session, the agent MUST define them using `define_subagent` upon first need, or invoke the built-in `research` (`Model: 'flash_lite'`) and `self` (`Model: 'flash_lite'`).
+## 3. Strict Direct-Action Boundaries
 
-4. **Preserve Context Separation**:
-   - When calling `invoke_subagent`, provide targeted instructions and the relevant file path or query.
-   - The subagent must return only the synthesized outcome or change confirmation back to the parent.
+The Brain may act directly ONLY for:
+- Reading `SKILL.md` / rule files or writing Brain artifacts (`brain/`).
+- Small targeted `read_file` calls (`<= 80` lines) on an already-known line range.
+- Trivial status checks (`pwd`, `git status`).
+
+## Red Flags — STOP and Delegate
+
+| Excuse / Thought | Reality |
+| :--- | :--- |
+| "I'll run `npm test` / `tsc` directly to see the error" | Raw logs pollute every subsequent turn. Invoke `builder` or `verifier`. |
+| "I'm already in a build-fix loop; subagents add overhead" | Multi-turn build loops are where context bloats fastest. Delegate edit → build → verify. |
+| "Let me read the whole file first to be sure" | Read in `code-searcher` with `DETAIL_LEVEL=exact_lines` or `exact_snippets`. |
+| "Calling `define_subagent` takes extra turns" | Native Limbs are pre-registered. Call `invoke_subagent` directly. |

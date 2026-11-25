@@ -51,3 +51,18 @@ test('all 4 native limb agents exist with flash_lite default, inheritCustomizati
   assert.equal(report.components.rules, 1);
   assert.equal(report.components.skills, 1);
 });
+
+test('rules/AGENTS.md and SKILL.md document all 4 limbs, exact-line signals, and rationalization table', () => {
+  const rulesText = fs.readFileSync(path.join(ROOT, 'rules', 'AGENTS.md'), 'utf8');
+  for (const token of ['code-searcher', 'fast-editor', 'builder', 'verifier', 'exact_lines', 'Red Flags']) {
+    assert.ok(rulesText.includes(token), `rules/AGENTS.md missing ${token}`);
+  }
+  const skillText = fs.readFileSync(
+    path.join(ROOT, 'skills', 'subagent-efficiency', 'SKILL.md'),
+    'utf8'
+  );
+  assert.match(skillText, /^description:\s*>-?\s*\n\s*Use when /m);
+  for (const token of ['code-searcher', 'fast-editor', 'builder', 'verifier', 'DETAIL_LEVEL']) {
+    assert.ok(skillText.includes(token), `SKILL.md missing ${token}`);
+  }
+});
