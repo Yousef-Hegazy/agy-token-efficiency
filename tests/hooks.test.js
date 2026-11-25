@@ -347,3 +347,89 @@ test('hooks.json configures all 5 lifecycle events cleanly', () => {
   assert.ok(Array.isArray(cfg.PreInvocation) && cfg.PreInvocation.length === 1);
   assert.ok(Array.isArray(cfg.Stop) && cfg.Stop.length === 1);
 });
+
+test('isSubagent handles >4KB first line in transcript.jsonl without truncation', () => {
+  const dir = makeTempStateDir();
+  const bigPrompt = 'x'.repeat(6000);
+  const subTranscript = path.join(dir, 'big-sub.jsonl');
+  fs.writeFileSync(
+    subTranscript,
+    JSON.stringify({ step_index: 0, source: 'SYSTEM', content: bigPrompt }) + '\n'
+  );
+  assert.equal(utils.isSubagent({ conversationId: 'sub-big', transcriptPath: subTranscript }, {}), true);
+});
+
+test('isExemptRead rejects null, empty string, and zero StartLine/EndLine', () => {
+  const payload = { artifactDirectoryPath: '' };
+  assert.equal(
+    utils.isExemptRead({ Path: 'd:/repo/src/big.ts', StartLine: null, EndLine: null }, payload),
+    false
+  );
+  assert.equal(
+    utils.isExemptRead({ Path: 'd:/repo/src/big.ts', StartLine: '', EndLine: '' }, payload),
+    false
+  );
+  assert.equal(
+    utils.isExemptRead({ Path: 'd:/repo/src/big.ts', StartLine: null, EndLine: 79 }, payload),
+    false
+  );
+  assert.equal(
+    utils.isExemptRead({ Path: 'd:/repo/src/big.ts', StartLine: 0, EndLine: 10 }, payload),
+    false
+  );
+});
+
+test('classifyShellCommand avoids false positives in git commit args and catches npm/pnpm/yarn run test', () => {
+  assert.equal(utils.classifyShellCommand('git commit -m "make tests pass"'), 'other');
+  assert.equal(utils.classifyShellCommand('git commit -m "fix jest and eslint"'), 'other');
+  assert.equal(utils.classifyShellCommand('npm run test'), 'test');
+  assert.equal(utils.classifyShellCommand('pnpm run test:unit'), 'test');
+  assert.equal(utils.classifyShellCommand('yarn run test'), 'test');
+  assert.equal(utils.classifyShellCommand('NODE_ENV=test npx tsc --noEmit'), 'build');
+  assert.equal(utils.classifyShellCommand('git status && npm run build'), 'build');
+});
+
+test('post-tool-track tracks IDE grep_search and find_by_name as search drift', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+  const convId = 'conv-ide-search';
+
+  assert.deepEqual(
+    runHook(
+      'scripts/post-tool-track.js',
+      { conversationId: convId, stepIdx: 2, toolCall: { name: 'grep_search', args: { Query: 'foo' } } },
+      env
+    ),
+    {}
+  );
+  let saved = utils.loadState(convId, stateDir);
+  assert.equal(saved.directBloatCount, 1);
+  assert.match(saved.pendingDriftNudge, /code-searcher/);
+
+  assert.deepEqual(
+    runHook(
+      'scripts/post-tool-track.js',
+      { conversationId: convId, stepIdx: 3, toolCall: { name: 'find_by_name', args: { Pattern: '*.js' } } },
+      env
+    ),
+    {}
+  );
+  saved = utils.loadState(convId, stateDir);
+  assert.equal(saved.directBloatCount, 2);
+});
+
+test('session-start skips Brain injection and does not cache false when transcriptPath is absent and lastUserInput is empty', () => {
+  const stateDir = makeTempStateDir();
+  const out = runHook(
+    'scripts/session-start.js',
+    {
+      conversationId: 'sub-pre-init',
+      transcriptPath: path.join(stateDir, 'missing.jsonl'),
+      lastUserInput: '',
+    },
+    { PLUGIN_DATA: stateDir }
+  );
+  assert.deepEqual(out, {});
+  const saved = utils.loadState('sub-pre-init', stateDir);
+  assert.equal(saved.isSubagent, null);
+});

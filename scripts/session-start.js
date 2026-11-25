@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('node:fs');
 const {
   readStdinJson,
   getStateDir,
@@ -16,12 +17,21 @@ async function main() {
   const stateDir = getStateDir();
   const state = loadState(convId, stateDir);
   const sub = isSubagent(payload, state);
-  state.isSubagent = sub;
-  saveState(convId, state, stateDir);
+  const hasTranscript = Boolean(payload.transcriptPath && fs.existsSync(payload.transcriptPath));
 
   if (sub) {
+    state.isSubagent = true;
+    saveState(convId, state, stateDir);
     return emitJson({});
   }
+
+  if (!hasTranscript && !payload.lastUserInput) {
+    saveState(convId, state, stateDir);
+    return emitJson({});
+  }
+
+  state.isSubagent = false;
+  saveState(convId, state, stateDir);
 
   return emitJson({
     injectSteps: [

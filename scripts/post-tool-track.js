@@ -86,6 +86,10 @@ async function main() {
       state.pendingDriftNudge =
         "Direct search command ran in Brain context. Delegate code searches to 'code-searcher' (flash_lite) and request exact file:line citations.";
     }
+  } else if (toolName === 'grep_search' || toolName === 'find_by_name') {
+    state.directBloatCount += 1;
+    state.pendingDriftNudge =
+      "Direct search tool ran in Brain context. Delegate code searches to 'code-searcher' (flash_lite) and request exact file:line citations.";
   } else if (toolName === 'read_file' || toolName === 'view_file') {
     if (!isExemptRead(args, payload)) {
       state.directBloatCount += 1;
