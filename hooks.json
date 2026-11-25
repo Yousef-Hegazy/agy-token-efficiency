@@ -4,7 +4,45 @@
       {
         "type": "command",
         "command": "node ./scripts/session-start.js",
-        "timeout": 10
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command|read_file|view_file|edit_file|replace_file_content|multi_replace_file_content|write_file|write_to_file|grep_search|find_by_name",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/pre-tool-gate.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "invoke_subagent|run_command|read_file|view_file|edit_file|replace_file_content|multi_replace_file_content|write_file|write_to_file|grep_search|find_by_name",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/post-tool-track.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/pre-invocation.js",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./scripts/stop-verify.js",
+        "timeout": 5
       }
     ]
   }

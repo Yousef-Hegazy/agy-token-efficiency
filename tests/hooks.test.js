@@ -216,3 +216,134 @@ test('pre-tool-gate routes build/search/edit/unbounded-read to exact limbs, resp
     'allow'
   );
 });
+
+test('post-tool-track + pre-invocation + stop-verify lifecycle tracks edits and prevents loops', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+  const convId = 'conv-lifecycle-1';
+
+  assert.deepEqual(
+    runHook(
+      'scripts/post-tool-track.js',
+      {
+        conversationId: convId,
+        stepIdx: 10,
+        toolCall: { name: 'invoke_subagent', args: { TypeName: 'fast-editor' } },
+      },
+      env
+    ),
+    {}
+  );
+  assert.equal(utils.loadState(convId, stateDir).unverifiedEdits, true);
+
+  const stop1 = runHook(
+    'scripts/stop-verify.js',
+    {
+      conversationId: convId,
+      executionNum: 1,
+      terminationReason: 'NO_TOOL_CALL',
+      fullyIdle: true,
+      continuationActive: false,
+    },
+    env
+  );
+  assert.equal(stop1.decision, 'continue');
+  assert.match(stop1.reason, /verifier/);
+
+  assert.deepEqual(
+    runHook(
+      'scripts/stop-verify.js',
+      {
+        conversationId: convId,
+        executionNum: 2,
+        terminationReason: 'NO_TOOL_CALL',
+        fullyIdle: true,
+        continuationActive: true,
+      },
+      env
+    ),
+    {}
+  );
+
+  assert.deepEqual(
+    runHook(
+      'scripts/stop-verify.js',
+      {
+        conversationId: convId,
+        executionNum: 1,
+        terminationReason: 'USER_CANCELED',
+        fullyIdle: true,
+        continuationActive: false,
+      },
+      env
+    ),
+    {}
+  );
+
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: convId,
+      stepIdx: 11,
+      toolCall: { name: 'invoke_subagent', args: { TypeName: 'verifier' } },
+    },
+    env
+  );
+  assert.equal(utils.loadState(convId, stateDir).unverifiedEdits, false);
+  assert.deepEqual(
+    runHook(
+      'scripts/stop-verify.js',
+      {
+        conversationId: convId,
+        executionNum: 1,
+        terminationReason: 'NO_TOOL_CALL',
+        fullyIdle: true,
+        continuationActive: false,
+      },
+      env
+    ),
+    {}
+  );
+});
+
+test('pre-invocation emits drift nudge at most once and clears flag immediately', () => {
+  const stateDir = makeTempStateDir();
+  const env = { PLUGIN_DATA: stateDir };
+  const convId = 'conv-nudge-1';
+
+  runHook(
+    'scripts/post-tool-track.js',
+    {
+      conversationId: convId,
+      stepIdx: 3,
+      toolCall: { name: 'run_command', args: { CommandLine: 'npm run build' } },
+    },
+    env
+  );
+
+  const inv1 = runHook(
+    'scripts/pre-invocation.js',
+    { conversationId: convId, invocationNum: 4, initialNumSteps: 4 },
+    env
+  );
+  assert.ok(Array.isArray(inv1.injectSteps) && inv1.injectSteps.length === 1);
+  assert.match(inv1.injectSteps[0].systemMessage.systemMessage, /builder/i);
+
+  const inv2 = runHook(
+    'scripts/pre-invocation.js',
+    { conversationId: convId, invocationNum: 5, initialNumSteps: 5 },
+    env
+  );
+  assert.deepEqual(inv2, {});
+});
+
+test('hooks.json configures all 5 lifecycle events cleanly', () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, 'hooks.json'), 'utf8'));
+  const cfg = hooks['subagent-efficiency'];
+  assert.ok(cfg);
+  assert.ok(Array.isArray(cfg.SessionStart) && cfg.SessionStart.length === 1);
+  assert.ok(Array.isArray(cfg.PreToolUse) && cfg.PreToolUse.length === 1);
+  assert.ok(Array.isArray(cfg.PostToolUse) && cfg.PostToolUse.length === 1);
+  assert.ok(Array.isArray(cfg.PreInvocation) && cfg.PreInvocation.length === 1);
+  assert.ok(Array.isArray(cfg.Stop) && cfg.Stop.length === 1);
+});
