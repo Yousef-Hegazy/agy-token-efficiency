@@ -26,3 +26,28 @@ test('plugin.json has v2 metadata, logo, and passes strict validation', () => {
   );
   assert.deepEqual(issues, []);
 });
+
+test('all 4 native limb agents exist with flash_lite default, inheritCustomizations false, and signal contract', () => {
+  const expected = ['code-searcher', 'fast-editor', 'builder', 'verifier'];
+  for (const name of expected) {
+    const file = path.join(ROOT, 'agents', `${name}.md`);
+    assert.ok(fs.existsSync(file), `Missing agents/${name}.md`);
+    const content = fs.readFileSync(file, 'utf8');
+    assert.match(content, new RegExp(`^name:\\s*${name}\\b`, 'm'));
+    assert.match(content, /^subagent:\s*true\b/m);
+    assert.match(content, /^mainAgent:\s*false\b/m);
+    assert.match(content, /^model:\s*flash_lite\b/m);
+    assert.match(content, /^inheritCustomizations:\s*false\b/m);
+    assert.match(content, /LOCATIONS:/);
+    assert.match(content, /STATUS:/);
+  }
+
+  const out = execFileSync('agy', ['plugin', 'validate', '--strict', '--json', ROOT], {
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(out);
+  assert.equal(report.components.agents, 4);
+  assert.equal(report.components.hooks, 1);
+  assert.equal(report.components.rules, 1);
+  assert.equal(report.components.skills, 1);
+});
