@@ -1,103 +1,104 @@
-# Token-Efficient Subagents (`subagent-efficiency`)
+# Token-Efficient Subagents (`subagent-efficiency` v2.0)
 
-A lightweight optimization plugin for **Google Antigravity** (Antigravity 2.0, Antigravity IDE, and `agy` CLI) designed to prevent context window saturation, reduce latency, and minimize LLM token consumption.
+A **Brain & Limbs** optimization plugin for **Google Antigravity** (Antigravity App, Antigravity IDE, and `agy` CLI) that isolates raw file reads, code searches, routine edits, builds, linters, and test runs inside lightweight `flash_lite` subagents—keeping the primary model's context window clean and reasoning costs minimal.
 
 ---
 
-## 🎯 How It Works & Why It Saves Tokens
+## Architecture: Brain & Limbs
 
-In standard agent workflows, when a high-reasoning model (e.g. Gemini Pro, Gemini Flash High) performs codebase search or mechanical code edits:
-1. **Context Window Flooding**: Reading multiple 500–2,000 line source files directly into the primary agent context adds thousands of tokens that persist across the entire conversation history. Every subsequent prompt in that session must re-process those tokens.
-2. **Excessive Reasoning Costs**: Generating complex chain-of-thought traces and verbose prose for simple repetitive edits (such as updating docstrings, formatting, or renaming variables) expends expensive reasoning tokens.
+- **The Brain (Primary Model):** Focuses strictly on planning, architectural reasoning, design decisions, and synthesizing final answers.
+- **The Limbs (4 Pre-Registered `flash_lite` Subagents in `agents/`):** Execute scoped operational work in isolated contexts and return terse, structured signals with exact `file:line` citations:
+  - **`code-searcher`** (`flash_lite`, read-only): File discovery, symbol grep, dependency tracing, and large/multi-file inspection.
+  - **`fast-editor`** (`flash_lite`, write-enabled): Targeted edits, refactors, docstrings, boilerplate, and file creation.
+  - **`builder`** (`flash_lite`, sandbox shell): Compiles, builds, typechecks (`tsc`, `cargo`, `mypy`, etc.), and linters (`eslint`, `ruff`); strips noisy logs and returns `file:line:col` error digests.
+  - **`verifier`** (`flash_lite`, sandbox shell): Runs test suites and verifies diffs/assertions; returns pass/fail counts and exact failing `file:line` locations.
 
-### The Delegation Solution
+### Token Economic Impact
 
-This plugin introduces a hierarchical delegation pattern:
-- **`code-searcher`** (`flash_lite`, Read-only): Searches files, greps patterns, and inspects definitions in an **isolated subagent context**. Only a concise 2–5 line excerpt with file paths and line numbers is returned to the primary session. The raw source files never enter the primary conversation context.
-- **`fast-editor`** (`flash_lite` / `flash`, Write-enabled): Performs mechanical edits, boilerplate expansions, and localized docstring updates with low reasoning overhead and zero conversational filler.
-- **Primary Agent** (Primary Model): Remains focused purely on system architecture, multi-file synthesis, complex debugging, and user interaction.
-
-### Token Economic Trade-offs
-
-| Scenario | Direct Execution (Without Plugin) | Delegated Subagent (With Plugin) | Net Token Impact |
+| Scenario | Direct Execution (Without Plugin) | Brain & Limbs (With Plugin) | Net Impact |
 | :--- | :--- | :--- | :--- |
-| **Grep / Search across 10 files** | Reads 5,000–15,000 tokens into primary context, paying on every future turn | Subagent reads in isolated context; returns ~150 tokens to parent | **~90–98% token reduction** over session life |
-| **Mechanical Edits (3 boilerplate files)** | High-reasoning model outputs extensive thinking + verbose commentary | `flash_lite` model executes direct edits with ~80% fewer reasoning tokens | **~60–85% token & cost savings** |
-| **Single 1–2 line edit in known file** | Direct `edit_file` takes ~50–100 tokens | Subagent definition + invocation overhead takes ~300–600 tokens | ⚠️ **Negative return** (Plugin rules advise direct editing here) |
+| **Grep / Search across 10 files** | Dumps 5,000–15,000 tokens into Brain context for every future turn | `code-searcher` inspects in isolation; returns exact `file:line` locations (~150 tokens) | **~90–98% token reduction** |
+| **Build / Typecheck / Test loops** | Compiler & test logs flood Brain history across iterative fix cycles | `builder` & `verifier` strip noise and return exact failing `file:line` digests | **~80–95% log bloat prevented** |
+| **Mechanical / Routine Edits** | Primary model burns high-tier output/reasoning tokens | `fast-editor` applies exact edits on `flash_lite` and reports modified lines | **~60–85% output/reasoning savings** |
+| **Skill / Artifact / `<=80`-line read** | Subagent spawn adds unnecessary latency | Explicitly exempted so Brain workflows stay fast with zero overhead | **Zero negative-ROI overhead** |
 
 ---
 
-## 📁 Repository Structure
+## Signal-In / Signal-Out Precision Contract
+
+Limbs communicate with the Brain using compact structured signals:
+
+- **Signal-In (Brain → Limb):** `TARGET`, `TASK`, `DETAIL_LEVEL` (`summary` | `exact_lines` | `exact_snippets`), and `CONSTRAINTS`.
+- **Signal-Out (Limb → Brain):** `STATUS` (`OK` | `FAIL` | `NOT_FOUND` | `AMBIGUOUS`), `LOCATIONS` (exact `path/to/file.ext:Lstart-Lend`), `SUMMARY` (1–5 terse bullets), optional `SNIPPETS` (when `exact_snippets` is requested or on failure), and `NEXT`.
+- **Model Escalation:** Always start on `flash_lite`; escalate a single retry to `flash` only if a Limb returns `AMBIGUOUS` or fails twice on the same task.
+
+---
+
+## Lifecycle Hooks & Enforcement Modes
+
+`hooks.json` configures five zero-dependency Node.js lifecycle hooks (exiting `0` safely across Windows, macOS, and Linux):
+
+| Hook | Script | Purpose |
+| :--- | :--- | :--- |
+| `SessionStart` | `scripts/session-start.js` | Marks root Brain conversation and injects `[Brain & Limbs Protocol Active]`. |
+| `PreToolUse` | `scripts/pre-tool-gate.js` | Intercepts high-bloat direct Brain tool calls (builds, tests, searches, workspace edits, unbounded reads) with a **1-shot redirect** (`soft-gate` default). Exempts subagents, `SKILL.md`/`.agents/`/`.gemini/`, artifacts, and `<=80`-line bounded reads. |
+| `PostToolUse` | `scripts/post-tool-track.js` | Tracks `invoke_subagent` delegations (`fast-editor`, `builder`, `verifier`) and flags unverified edits or Brain drift. |
+| `PreInvocation` | `scripts/pre-invocation.js` | Injects a single, non-repeating drift reminder only when Brain drift occurred (never spams every turn). |
+| `Stop` | `scripts/stop-verify.js` | Prompts once (`continuationActive`-guarded) if workspace edits have not been checked by `verifier`. |
+
+### Configuring Gate Mode (`AGY_EFFICIENCY_MODE`)
+
+Set `AGY_EFFICIENCY_MODE` (or `"mode"` inside `$PLUGIN_DATA/config.json`):
+- **`soft-gate`** *(default)*: Blocks an unmistakable direct Brain violation once per call signature and allows an explicit retry (preventing multi-turn retry loops while stopping accidental context dumps).
+- **`advisory`**: Disables `PreToolUse` denials; relies on rules, `PreInvocation` drift notices, and `Stop` verification reminders.
+- **`strict`**: Blocks all non-exempt direct Brain searches, workspace edits, builds, and tests even on retry.
+
+---
+
+## Repository Structure
 
 ```text
 subagent-efficiency/
-├── plugin.json                    # Plugin manifest
-├── hooks.json                     # SessionStart lifecycle hook
+├── plugin.json                        # Plugin manifest (v2.0.0)
+├── hooks.json                         # 5 lifecycle hooks configuration
+├── assets/
+│   └── logo.svg                       # Square plugin icon
+├── agents/
+│   ├── code-searcher.md               # Read-only search & exact-line limb
+│   ├── fast-editor.md                 # Targeted editing limb
+│   ├── builder.md                     # Build, compile, typecheck & lint limb
+│   └── verifier.md                    # Test execution & verification limb
 ├── rules/
-│   └── AGENTS.md                  # Strict delegation rules & anti-patterns
+│   └── AGENTS.md                      # Brain & Limbs routing + Red Flags table
 ├── skills/
 │   └── subagent-efficiency/
-│       └── SKILL.md               # Subagent schemas & invocation templates
+│       └── SKILL.md                   # SDO skill & Signal-In/Signal-Out templates
 ├── scripts/
-│   └── session-start.js           # SessionStart hook runner (exits 0 with injectSteps)
+│   ├── hook-utils.js                  # Shared state, classification & exemptions
+│   ├── session-start.js
+│   ├── pre-tool-gate.js
+│   ├── post-tool-track.js
+│   ├── pre-invocation.js
+│   └── stop-verify.js
+├── tests/
+│   ├── hooks.test.js                  # Unit & stdin/stdout contract tests
+│   └── plugin-validate.test.js        # Manifest, agent & strict CLI checks
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## 🚀 Installation via `agy` CLI
-
-### Option A: Install from Local Directory
-Clone or navigate to the directory and run:
+## Installation & Verification
 
 ```bash
-agy plugin install /path/to/subagent-efficiency
-```
+# Validate strictly with Antigravity CLI
+agy plugin validate --strict .
 
-### Option B: Install from Git Remote
-Install directly from GitHub:
+# Run automated hook and plugin contract tests (Node >= 18)
+node --test tests/*.test.js
 
-```bash
+# Install from local directory or GitHub
+agy plugin install /path/to/agy-token-efficiency
 agy plugin install https://github.com/Yousef-Hegazy/agy-token-efficiency.git
-```
-
----
-
-## 🔍 Validation & Management
-
-### Validate Plugin Integrity
-```bash
-agy plugin validate /path/to/subagent-efficiency
-```
-
-### List Installed Plugins
-```bash
-agy plugin list
-```
-
-### Enable / Disable Plugin
-```bash
-agy plugin enable subagent-efficiency
-agy plugin disable subagent-efficiency
-```
-
-### Uninstall Plugin
-```bash
-agy plugin uninstall subagent-efficiency
-```
-
----
-
-## 🛠️ Testing the Hook Locally
-
-To test the `SessionStart` hook standalone:
-
-```bash
-node ./scripts/session-start.js
-```
-
-Expected output:
-```json
-{"injectSteps":[{"systemMessage":{"systemMessage":"[Token-Efficiency Protocol Active]..."}}]}
 ```
