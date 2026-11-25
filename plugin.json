@@ -1,6 +1,28 @@
 {
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "subagent-efficiency",
   "displayName": "Token-Efficient Subagents",
-  "version": "1.0.0",
-  "description": "Low-reasoning subagents and automated delegation rules for fast code editing and code searching to drastically reduce token usage in Antigravity 2.0 and Antigravity IDE."
+  "version": "2.0.0",
+  "description": "Brain-and-Limbs delegation architecture using native flash_lite subagents (searcher, editor, builder, verifier) and loop-proof hooks to eliminate context bloat.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Explore this repository using code-searcher and summarize its architecture with exact file and line citations",
+    "Implement the requested change using fast-editor, then run builder and verifier to confirm everything passes",
+    "Run the project build and test suite via builder and verifier and report any failures with exact file:line locations"
+  ],
+  "author": {
+    "name": "Yousef Hegazy",
+    "url": "https://github.com/Yousef-Hegazy"
+  },
+  "homepage": "https://github.com/Yousef-Hegazy/agy-token-efficiency",
+  "repository": "https://github.com/Yousef-Hegazy/agy-token-efficiency",
+  "license": "MIT",
+  "keywords": [
+    "tokens",
+    "subagents",
+    "efficiency",
+    "context-window",
+    "delegation",
+    "flash-lite"
+  ]
 }
