@@ -1,58 +1,48 @@
 #!/usr/bin/env node
 'use strict';
-
 const fs = require('node:fs');
-const {
-  readStdinJson,
-  getStateDir,
-  loadState,
-  saveState,
-  isSubagent,
-  detectShellEnvironment,
-  emitJson,
-} = require('./hook-utils');
+const path = require('node:path');
 
-async function main() {
-  const payload = await readStdinJson(500);
-  const convId = payload.conversationId;
-  const stateDir = getStateDir();
-  const state = loadState(convId, stateDir);
-  const sub = isSubagent(payload, state);
-  const hasTranscript = Boolean(payload.transcriptPath && fs.existsSync(payload.transcriptPath));
-
-  if (sub) {
-    state.isSubagent = true;
-    saveState(convId, state, stateDir);
-    return emitJson({});
-  }
-
-  if (!hasTranscript && !payload.lastUserInput) {
-    saveState(convId, state, stateDir);
-    return emitJson({});
-  }
-
-  state.isSubagent = false;
-  saveState(convId, state, stateDir);
-
-  const envInfo = detectShellEnvironment();
-
-  return emitJson({
-    injectSteps: [
-      {
-        systemMessage: {
-          systemMessage:
-            '[Brain & Limbs Protocol Active — 3-Tier Total-Cost Balanced]\n' +
-            'Optimize Total Cost = (Brain_Turns x Avg_Context) + Limb_Cold_Starts (target <=10-15 Limbs/task).\n' +
-            '- Brain (top-tier): planning, hard debugging, bounded reads <=300 lines (or small files <=250 lines / 10 KB), and <50-line surgical edits in context.\n' +
-            "- Mid-tier (Model: 'flash'): 'implementer' for complex/type-heavy logic & large/multi-file edits (+ targeted self-verify).\n" +
-            "- Lite-tier (Model: 'flash_lite'): 'code-searcher' (1 comprehensive batch + verbatim signatures/imports), 'fast-editor' (strictly mechanical/boilerplate), 'verifier' (all builds/lints/tests/diff checks).\n" +
-            '- Zero-Polling Rule: NEVER use schedule/sleep timers to poll subagents—end turn and wait for automatic wakeup.\n' +
-            `- ${envInfo.shellHint}\n` +
-            `- ${envInfo.testHint}`,
-        },
-      },
-    ],
+function readStdin(ms = 500) {
+  return new Promise((res) => {
+    let buf = '', done = false;
+    const end = () => { if (done) return; done = true; try { res(buf.trim() ? JSON.parse(buf) : {}); } catch { res({}); } };
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { buf += c; });
+    process.stdin.on('end', end);
+    process.stdin.on('error', end);
+    const t = setTimeout(end, ms);
+    if (t.unref) t.unref();
   });
 }
 
-main().catch(() => emitJson({}));
+function isSubagent(p) {
+  try {
+    if (!p || !fs.existsSync(p)) return false;
+    const line = fs.readFileSync(p, 'utf8').split(/\r?\n/, 1)[0].trim();
+    const first = line ? JSON.parse(line) : null;
+    return Boolean(first && first.source && first.source !== 'USER_EXPLICIT');
+  } catch { return false; }
+}
+
+function getShellHint() {
+  const sh = String(process.env.SHELL || process.env.AGY_SHELL || '').trim();
+  if (process.platform === 'win32' && !/(?:bash|zsh|sh|fish|pwsh)(?:\.exe)?$/i.test(sh) && !process.env.POWERSHELL_DISTRIBUTION_CHANNEL) {
+    return '[Env] OS=win32 | Windows PowerShell 5.1: NEVER use `&&`; chain with `; if ($LASTEXITCODE -eq 0) { ... }`.';
+  }
+  const label = sh ? path.posix.basename(sh.replace(/\\/g, '/')) : (process.platform === 'win32' ? 'pwsh' : 'sh/bash');
+  return `[Env] OS=${process.platform} | Shell=${label}: '&&' supported.`;
+}
+
+(async () => {
+  const payload = await readStdin();
+  if (isSubagent(payload.transcriptPath)) return process.stdout.write('{}');
+  const msg = [
+    '[Brain & Limbs — Brain + 2 I/O Limbs]',
+    '- Brain edits directly on warm cache (use `/effort medium` during implementation); bounded reads <=300 lines (or small files <=250 lines / 10 KB).',
+    '- `code-searcher` (`flash_lite`, <=2-3 runs): broad recon & >300-line files; `verifier` (`flash_lite`): noisy build/test/coverage runs.',
+    '- Zero-Polling: NEVER poll `manage_task(status)`, `schedule`, or `sleep`—end turn and wait for automatic wakeup.',
+    `- ${getShellHint()}`,
+  ].join('\n');
+  process.stdout.write(JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: msg } }] }));
+})().catch(() => process.stdout.write('{}'));

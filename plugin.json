@@ -3,11 +3,11 @@
   "name": "subagent-efficiency",
   "displayName": "Token-Efficient Subagents",
   "version": "2.0.0",
-  "description": "3-tier Brain & Limbs delegation architecture using flash_lite (code-searcher, fast-editor, verifier), mid-tier flash (implementer), and loop-proof hooks to eliminate context bloat.",
+  "description": "Lean Brain + 2 I/O Limbs architecture using flash_lite (code-searcher, verifier) and loop-proof hooks so Brain edits directly on its warm prompt cache without raw log bloat.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Explore this repository using code-searcher and summarize its architecture with exact file and line citations",
-    "Implement the requested multi-file feature using implementer (or fast-editor for boilerplate), then run verifier to confirm everything passes",
+    "Implement the requested multi-file feature directly in Brain, then run verifier to confirm everything passes",
     "Run the project build, lint, and test suite via verifier and report any failures with exact file:line locations and snippets"
   ],
   "author": {
@@ -23,7 +23,6 @@
     "efficiency",
     "context-window",
     "delegation",
-    "flash-lite",
-    "flash"
+    "flash-lite"
   ]
 }
